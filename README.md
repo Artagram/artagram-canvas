@@ -6,6 +6,319 @@ módulos comparten. Es el destino final de lo que hoy vive en
 `ARTAGRAM-backv1/src/main/java/com/artagram/platform/{canvas,party,realtime}`
 (ver `artagram-infra/docs/PLAN_MIGRACION_ARTAGRAM.md`, Fase 7).
 
+## Descripción del servicio
+
+`artagram-canvas` es el microservicio dueño de toda la experiencia de dibujo
+colaborativo en tiempo real de Artagram: el lienzo comunitario (trazos
+persistentes con bloqueo de edición exclusivo), el banner comunitario
+particionado en regiones (HU-16), el modo fiesta (salas efímeras con rondas
+cronometradas) y la entrega en vivo de chat y notificaciones de feed sobre el
+mismo canal WebSocket/STOMP (`/ws`). Existe como servicio separado porque
+agrupa una responsabilidad técnica muy distinta a la del resto de la
+plataforma — mantener conexiones WebSocket de larga duración, resolver
+concurrencia (varios usuarios editando el mismo trazo o pintando la misma
+región del banner a la vez) y escalar horizontalmente sin perder mensajes —
+y porque todos sus módulos (`canvas`, `banner`, `party`, `chat`) comparten la
+misma infraestructura de tiempo real (`RealtimeBroadcaster`,
+`DestinationAuthorizer`, locks distribuidos sobre Redis), que no tendría
+sentido duplicar ni acoplar a servicios con un perfil de carga muy distinto
+(REST/CRUD) como `artagram-users` o `artagram-feed`.
+
+## Responsabilidades
+
+- Recibir y retransmitir en vivo los trazos en progreso del lienzo
+  colaborativo por STOMP sin persistirlos (`CanvasService.procesarParcial`),
+  y persistir el trazo final con un número de secuencia asignado de forma
+  atómica por comunidad (`Lienzo.siguienteSecuencia`, `CanvasService.finalizarTrazo`).
+- Exponer el bloqueo exclusivo de edición de un trazo ya finalizado
+  (`TrazoLockController`/`TrazoLockService`), para que solo un usuario a la
+  vez pueda modificarlo, con expiración automática por TTL si el dueño se
+  desconecta sin liberarlo.
+- Proveer locks distribuidos de propósito general sobre Redis
+  (`DistributedLockService`), reutilizados por el trazo del lienzo y por el
+  borrador compartido del modo fiesta.
+- Repartir cada mensaje de tiempo real (dibujo, bloqueos, banner, fiesta,
+  chat) entre **todas** las instancias del servicio (`RealtimeBroadcaster`),
+  para que el `SimpleBroker` en memoria de cada instancia no limite la
+  entrega a los clientes conectados justo a esa instancia.
+- Autorizar, por tipo de destino STOMP, quién puede suscribirse o publicar en
+  cada canal (`DestinationAuthorizer` y sus implementaciones
+  `ComunidadTopicAuthorizer`, `PartyTopicAuthorizer`, `BannerTopicAuthorizer`),
+  verificando membresía o participación activa antes de dejar pasar el mensaje.
+- Gestionar el banner comunitario (HU-16): pintar por REST o STOMP con límite
+  de ritmo por usuario (`BannerRateLimiter`, 100 operaciones/segundo vía
+  `RRateLimiter` de Redisson), serializar la escritura por región con
+  bloqueo pesimista de fila, y consolidar periódicamente los trazos nuevos en
+  snapshots PNG (`BannerSnapshotJob` + `BannerRasterService`) para no tener
+  que reproducir todo el historial al cargar.
+- Operar el modo fiesta: ciclo de vida de salas y rondas cronometradas
+  (`SalaFiestaService`, `PartyRoundClock`, `PartyTickScheduler`), dibujo y
+  bloqueo del borrador compartido (`PartyDrawService`) y chat de sala en vivo
+  (`PartyChatStompController`).
+- Administrar comunidades, membresías y roles 100% en este servicio
+  (`ComunidadService`), sin depender de `ARTAGRAM-backv1` para resolver
+  membresía.
+- Mantener una proyección local de usuario (`UsuarioProyeccion`) sincronizada
+  por eventos de RabbitMQ (`user.registered`, `subscription.updated`), con
+  creación al vuelo desde el propio JWT si el evento aún no llegó.
+- Retransmitir por STOMP los eventos de likes/comentarios publicados por
+  `artagram-feed` (`FeedEventBridge`) hacia los clientes suscritos al feed.
+- Autenticar REST y el handshake WebSocket con el mismo JWT RS256
+  (`JwtService`, `JwtHandshakeInterceptor`), validado contra la llave pública
+  de `artagram-auth`.
+
+## Diagrama de clases
+
+```mermaid
+classDiagram
+    class DestinationAuthorizer {
+        <<interface>>
+        +soporta(destino) boolean
+        +autorizado(principal, destino) boolean
+    }
+    class ComunidadTopicAuthorizer
+    class PartyTopicAuthorizer
+    class BannerTopicAuthorizer
+    DestinationAuthorizer <|.. ComunidadTopicAuthorizer
+    DestinationAuthorizer <|.. PartyTopicAuthorizer
+    DestinationAuthorizer <|.. BannerTopicAuthorizer
+
+    class RealtimeBroadcaster {
+        -RedissonClient redissonClient
+        -SimpMessagingTemplate messagingTemplate
+        -ObjectMapper objectMapper
+        +enviar(destino, payload)
+        +enviarAUsuario(usuarioId, destino, payload)
+    }
+    class DistributedLockService {
+        -RedissonClient redissonClient
+        +adquirir(clave, propietario, ttl) boolean
+        +renovar(clave, propietario, ttl) boolean
+        +liberar(clave, propietario) boolean
+        +propietarioActual(clave) Optional~String~
+    }
+    class ConcurrencyMetrics {
+        +registrarBloqueoNegado()
+        +registrarEsperaBloqueo(millis)
+        +registrarDisputaBorrador()
+    }
+
+    class CanvasController {
+        +obtenerTrazos(comunidadId, desde) List~TrazoDto~
+    }
+    class CanvasService {
+        -LienzoRepository lienzoRepository
+        -TrazoRepository trazoRepository
+        -ComunidadService comunidadService
+        +procesarParcial(comunidadId, autorId, request) TrazoEventoDto
+        +finalizarTrazo(comunidadId, autorId, request) TrazoEventoDto
+        +obtenerTrazosDesde(comunidadId, desde) List~Trazo~
+    }
+    class TrazoLockController {
+        +tomar(comunidadId, trazoId) BloqueoTrazoResponse
+        +renovar(comunidadId, trazoId)
+        +liberar(comunidadId, trazoId)
+        +editar(comunidadId, trazoId, body)
+    }
+    class TrazoLockService {
+        -DistributedLockService lockService
+        -ComunidadService comunidadService
+        -RealtimeBroadcaster broadcaster
+        +tomar(comunidadId, trazoId, usuarioId, nombre) BloqueoTrazoResponse
+        +renovar(trazoId, usuarioId, nombre) boolean
+        +liberar(comunidadId, trazoId, usuarioId, nombre)
+        +editar(comunidadId, trazoId, usuarioId, nombre, request)
+    }
+    class LienzoRepository
+    class TrazoRepository
+    class Lienzo {
+        +UUID comunidadId
+        +siguienteSecuencia() long
+    }
+    class Trazo {
+        +UsuarioProyeccion autor
+        +long secuencia
+        +List~Punto~ puntos
+        +actualizarContenido(...)
+    }
+    Lienzo "1" --> "many" Trazo
+    CanvasController --> CanvasService
+    CanvasController --> ComunidadService
+    CanvasService --> LienzoRepository
+    CanvasService --> TrazoRepository
+    CanvasService --> ComunidadService
+    TrazoLockController --> TrazoLockService
+    TrazoLockService --> DistributedLockService
+    TrazoLockService --> TrazoRepository
+    TrazoLockService --> ComunidadService
+    TrazoLockService --> RealtimeBroadcaster
+    TrazoLockService --> ConcurrencyMetrics
+
+    class BannerController {
+        +obtenerEstado(comunidadId) List~RegionEstadoDto~
+        +pintar(comunidadId, request)
+    }
+    class BannerStompController
+    class BannerService {
+        -BannerRateLimiter rateLimiter
+        +pintar(comunidadId, usuarioId, nombre, rolGlobal, request) BannerTrazoEventoDto
+        +obtenerEstado(comunidadId) List~RegionEstadoDto~
+    }
+    class BannerRateLimiter {
+        -RedissonClient redissonClient
+        +permitir(comunidadId, usuarioId) boolean
+    }
+    class BannerSnapshotJob {
+        +consolidar()
+    }
+    class BannerRasterService {
+        +renderizar(base, tamanoRegion, trazos) byte[]
+    }
+    class BannerComunitarioRepository
+    class BannerRegionEstadoRepository
+    class BannerTrazoRepository
+    class BannerSnapshotRepository
+    class BannerComunitario {
+        +UUID comunidadId
+        +int tamano
+        +int tamanoRegion
+    }
+    class BannerRegionEstado {
+        +int regionIndex
+        +siguienteSecuencia() long
+    }
+    class BannerTrazo {
+        +int regionIndex
+        +long secuencia
+        +UsuarioProyeccion autor
+    }
+    class BannerSnapshot {
+        +byte[] png
+        +long ultimaSecuenciaIncluida
+        +actualizar(png, secuencia)
+    }
+    BannerComunitario "1" --> "many" BannerRegionEstado
+    BannerRegionEstado "1" --> "many" BannerTrazo
+    BannerRegionEstado "1" --> "0..1" BannerSnapshot
+    BannerController --> BannerService
+    BannerController --> RealtimeBroadcaster
+    BannerStompController --> BannerService
+    BannerStompController --> RealtimeBroadcaster
+    BannerService --> BannerRateLimiter
+    BannerService --> BannerComunitarioRepository
+    BannerService --> BannerRegionEstadoRepository
+    BannerService --> BannerTrazoRepository
+    BannerService --> BannerSnapshotRepository
+    BannerService --> ConcurrencyMetrics
+    BannerSnapshotJob --> BannerRasterService
+    BannerSnapshotJob --> BannerTrazoRepository
+    BannerSnapshotJob --> BannerSnapshotRepository
+
+    class ComunidadService {
+        -ComunidadRepository comunidadRepository
+        -MembresiaComunidadRepository membresiaRepository
+        +esMiembroActivo(usuarioId, comunidadId) boolean
+    }
+```
+
+> El diagrama omite `party`, `community` (más allá de `ComunidadService`) y
+> `usuario` por espacio — están cubiertos con el mismo nivel de detalle en los
+> dos diagramas de la sección "Diseño y Arquitectura" más abajo, que ya
+> reflejan el código real de esos paquetes.
+
+## Atributos de calidad
+
+### Escalabilidad
+
+El diseño de `RealtimeBroadcaster` es, a propósito, el punto central de
+escalabilidad del servicio: cada instancia mantiene su propio `SimpleBroker`
+en memoria (solo entrega a las sesiones WebSocket conectadas a ella), pero
+publica cada mensaje en un `RTopic` de Redis Pub/Sub (`artagram:canvas-stomp-relay`)
+que todas las instancias — incluida la que publicó — consumen para hacer la
+entrega local real. Esto permite agregar instancias detrás de un balanceador
+sin que un cliente deje de recibir eventos solo por estar conectado a una
+instancia distinta de la que originó el mensaje.
+
+- **Fuente**: operaciones escala el servicio agregando una segunda instancia
+  de `artagram-canvas` detrás del load balancer, mientras ya hay usuarios con
+  sesiones WebSocket abiertas repartidas entre instancias.
+- **Estímulo**: un usuario conectado a la instancia A dibuja un trazo; otro
+  usuario de la misma comunidad está conectado a la instancia B.
+- **Artefacto**: `RealtimeBroadcaster` + `SimpleBroker` (`WebSocketConfig`).
+- **Ambiente**: operación normal, múltiples instancias activas compartiendo
+  el mismo Redis, carga de producción creciente.
+- **Respuesta**: la instancia A publica el evento en el tópico Redis; todas
+  las instancias (A y B) lo reciben vía `RTopic.addListener` y lo entregan
+  localmente con `SimpMessagingTemplate` a sus propias sesiones STOMP, sin
+  que las instancias necesiten conocerse entre sí ni compartir estado en JVM.
+- **Medida de respuesta**: el 100% de los clientes conectados a cualquier
+  instancia reciben el evento, con una latencia adicional acotada al salto
+  de publicación/entrega de Redis Pub/Sub dentro de la misma red; el número
+  de instancias puede crecer o decrecer sin reconfigurar el mecanismo de
+  entrega (solo la conexión WebSocket en sí requiere *sticky sessions* en el
+  ALB, no la propagación de mensajes).
+
+### Consistencia (concurrencia)
+
+Los locks distribuidos vía Redisson (`DistributedLockService`, usado por
+`TrazoLockService` para el bloqueo de trazo y por `PartyDrawService` para el
+borrador del modo fiesta) garantizan exclusión mutua entre instancias, no
+solo dentro de una JVM — necesario porque el servicio corre varias instancias
+y dos peticiones que compiten por el mismo trazo pueden llegar a instancias
+distintas.
+
+- **Fuente**: dos usuarios miembros activos de la misma comunidad.
+- **Estímulo**: ambos intentan tomar el bloqueo de edición del mismo trazo
+  casi simultáneamente (una petición puede caer en otra instancia que la
+  otra).
+- **Artefacto**: `TrazoLockService.tomar` + `DistributedLockService.adquirir`
+  (comando `SET NX PX` atómico sobre la clave `trazo-lock:{trazoId}`).
+- **Ambiente**: operación normal, múltiples instancias del servicio
+  compartiendo el mismo Redis.
+- **Respuesta**: solo una de las dos peticiones obtiene el lock, porque el
+  `SET NX PX` es atómico a nivel de Redis independientemente de qué instancia
+  lo ejecute; la otra recibe `BloqueoTrazoResponse(tomado=false)` con el
+  nombre del dueño actual, y si de todas formas intenta editar sin el lock,
+  `TrazoLockService.editar` rechaza con `ApiException.forbidden("TRAZO_NO_TOMADO")`.
+- **Medida de respuesta**: 0% de ediciones concurrentes aplicadas sobre el
+  mismo trazo; el lock se libera solo (sin intervención) a más tardar a los
+  30s (TTL fijo) si el dueño se desconecta sin liberarlo explícitamente, así
+  que un cliente caído nunca bloquea el trazo de forma permanente.
+
+### Modificabilidad (configuración muerta de S3)
+
+`application.yml` y la task definition de este servicio definen
+`app.storage.s3.*` (`S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY`,
+`S3_SECRET_KEY`, `S3_PATH_STYLE`). Se confirmó con `grep -rn "S3\|Storage"
+src/main/java` que **no existe ningún resultado**: ninguna clase
+`@ConfigurationProperties` vincula ese prefijo y no hay cliente S3
+(`S3Client`/`AmazonS3`) en todo el código fuente del servicio. Es config
+heredada de la plantilla común a otros microservicios de Artagram (p. ej.
+`artagram-feed`, que sí sube imágenes a S3) y nunca se usó aquí: el PNG
+consolidado del banner se guarda como `byte[]` en Postgres
+(`BannerSnapshot.png`), no en un bucket.
+
+- **Fuente**: un desarrollador que se incorpora al equipo o hace mantenimiento
+  de infraestructura.
+- **Estímulo**: necesita entender o cambiar la configuración de
+  almacenamiento de archivos de `artagram-canvas` (por ejemplo, rotar
+  credenciales o migrar de bucket) y encuentra `storage.s3.*` en
+  `application.yml` y las variables `S3_*` en la task definition de ECS.
+- **Artefacto**: `src/main/resources/application.yml` (bloque `app.storage.s3`)
+  y la task definition del servicio.
+- **Ambiente**: mantenimiento/onboarding, fuera de producción.
+- **Respuesta**: al grepear el código fuente no encuentra ninguna clase que
+  lea esas propiedades ni ningún cliente S3 — tiene que investigar para
+  confirmar que es config muerta en vez de asumir (incorrectamente) que
+  `artagram-canvas` sube o sirve binarios desde S3.
+- **Medida de respuesta**: tiempo de investigación evitable (hoy, el de este
+  análisis) y superficie de configuración innecesaria (credenciales/variables
+  de un bucket referenciadas sin uso real). Acción recomendada: eliminar el
+  bloque `storage.s3` de `application.yml` y las variables `S3_*` de la task
+  definition de este servicio específico, o documentar explícitamente por
+  qué se conserva, para que no se asuma erróneamente una dependencia que no
+  existe.
+
 ## Puerto y base de datos
 
 - Puerto local: `8088` **temporal**. El puerto "definitivo" de la arquitectura
