@@ -45,11 +45,13 @@ public class BannerService {
     private final BannerRateLimiter rateLimiter;
     private final ConcurrencyMetrics metrics;
     private final CanvasProperties properties;
+    private final BannerSnapshotStorageService storageService;
 
     public BannerService(BannerComunitarioRepository bannerRepository, BannerRegionEstadoRepository regionEstadoRepository,
                           BannerTrazoRepository bannerTrazoRepository, BannerSnapshotRepository snapshotRepository,
                           UsuarioProyeccionResolver usuarioResolver, ComunidadService comunidadService,
-                          BannerRateLimiter rateLimiter, ConcurrencyMetrics metrics, CanvasProperties properties) {
+                          BannerRateLimiter rateLimiter, ConcurrencyMetrics metrics, CanvasProperties properties,
+                          BannerSnapshotStorageService storageService) {
         this.bannerRepository = bannerRepository;
         this.regionEstadoRepository = regionEstadoRepository;
         this.bannerTrazoRepository = bannerTrazoRepository;
@@ -59,6 +61,7 @@ public class BannerService {
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
         this.properties = properties;
+        this.storageService = storageService;
     }
 
     /**
@@ -124,7 +127,9 @@ public class BannerService {
                             t.getOpacidad(), t.getPuntos()))
                     .toList();
             String base64 = snapshot.map(s -> Base64.getEncoder().encodeToString(s.getPng())).orElse(null);
-            return new RegionEstadoDto(regionIndex, base64, pendientes);
+            String url = snapshot.map(BannerSnapshot::getS3Key).filter(k -> k != null && !k.isBlank())
+                    .map(storageService::presignarUrl).orElse(null);
+            return new RegionEstadoDto(regionIndex, url, base64, pendientes);
         }).toList();
     }
 

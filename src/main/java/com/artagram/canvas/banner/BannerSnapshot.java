@@ -29,6 +29,9 @@ public class BannerSnapshot {
     @Column(nullable = false)
     private byte[] png;
 
+    @Column(name = "s3_key")
+    private String s3Key;
+
     @Column(name = "ultima_secuencia_incluida", nullable = false)
     private long ultimaSecuenciaIncluida;
 
@@ -55,6 +58,14 @@ public class BannerSnapshot {
 
     public byte[] getPng() {
         return png;
+    }
+
+    public String getS3Key() {
+        return s3Key;
+    }
+
+    public void setS3Key(String s3Key) {
+        this.s3Key = s3Key;
     }
 
     public long getUltimaSecuenciaIncluida() {

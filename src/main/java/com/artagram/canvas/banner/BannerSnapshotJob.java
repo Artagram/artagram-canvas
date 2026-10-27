@@ -25,15 +25,17 @@ public class BannerSnapshotJob {
     private final BannerTrazoRepository trazoRepository;
     private final BannerSnapshotRepository snapshotRepository;
     private final BannerRasterService rasterService;
+    private final BannerSnapshotStorageService storageService;
 
     public BannerSnapshotJob(BannerComunitarioRepository bannerRepository, BannerRegionEstadoRepository regionRepository,
                               BannerTrazoRepository trazoRepository, BannerSnapshotRepository snapshotRepository,
-                              BannerRasterService rasterService) {
+                              BannerRasterService rasterService, BannerSnapshotStorageService storageService) {
         this.bannerRepository = bannerRepository;
         this.regionRepository = regionRepository;
         this.trazoRepository = trazoRepository;
         this.snapshotRepository = snapshotRepository;
         this.rasterService = rasterService;
+        this.storageService = storageService;
     }
 
     @Scheduled(fixedDelayString = "${app.canvas.snapshot-interval-ms:30000}")
@@ -59,9 +61,19 @@ public class BannerSnapshotJob {
         byte[] renderizado = rasterService.renderizar(base, banner.getTamanoRegion(), nuevos);
         long nuevaSecuencia = nuevos.get(nuevos.size() - 1).getSecuencia();
 
-        snapshotExistente.ifPresentOrElse(
-                s -> s.actualizar(renderizado, nuevaSecuencia),
-                () -> snapshotRepository.save(new BannerSnapshot(banner.getId(), region.getRegionIndex(), renderizado, nuevaSecuencia)));
+        BannerSnapshot snapshot = snapshotExistente
+                .map(s -> {
+                    s.actualizar(renderizado, nuevaSecuencia);
+                    return s;
+                })
+                .orElseGet(() -> snapshotRepository.save(
+                        new BannerSnapshot(banner.getId(), region.getRegionIndex(), renderizado, nuevaSecuencia)));
+
+        String key = storageService.claveDe(banner.getId(), region.getRegionIndex());
+        if (storageService.subir(key, renderizado)) {
+            snapshot.setS3Key(key);
+        }
+
         log.info("Snapshot consolidado banner={} region={} hastaSecuencia={}", banner.getId(), region.getRegionIndex(), nuevaSecuencia);
     }
 }
