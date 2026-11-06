@@ -53,9 +53,9 @@ public class ComunidadService {
             throw ApiException.conflict("NOMBRE_COMUNIDAD_TOMADO", "Ese nombre de comunidad ya esta tomado");
         }
         if (!premium && comunidadRepository.countByCreador_UsuarioId(usuarioId) >= properties.getFreeMaxCommunities()) {
-            throw ApiException.forbidden("TOPE_COMUNIDADES",
+            throw ApiException.forbidden("PLAN_LIMITE",
                     "Llegaste al limite de " + properties.getFreeMaxCommunities()
-                            + " comunidades del plan gratis. Pasate a premium para crear comunidades ilimitadas");
+                            + " comunidades del plan gratis. Pasate a PRO para crear comunidades ilimitadas");
         }
 
         UsuarioProyeccion creador = usuarioResolver.resolver(usuarioId, nombreUsuario, premium);
