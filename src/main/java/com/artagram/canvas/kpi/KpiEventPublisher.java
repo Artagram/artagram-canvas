@@ -29,9 +29,12 @@ public class KpiEventPublisher {
         this.exchange = exchange;
     }
 
-    public void publicarSesionIniciada(UUID usuarioId) {
+    public void publicarSesionIniciada(UUID usuarioId, String actividadId, String tipo, UUID recursoId) {
         Map<String, Object> payload = Map.of(
                 "usuarioId", usuarioId.toString(),
+                "actividadId", actividadId,
+                "tipo", tipo,
+                "recursoId", recursoId.toString(),
                 "ocurridoEn", Instant.now().toString()
         );
         try {
@@ -41,9 +44,10 @@ public class KpiEventPublisher {
         }
     }
 
-    public void publicarSesionTerminada(UUID usuarioId, long duracionMs) {
+    public void publicarSesionTerminada(UUID usuarioId, String actividadId, long duracionMs) {
         Map<String, Object> payload = Map.of(
                 "usuarioId", usuarioId.toString(),
+                "actividadId", actividadId,
                 "duracionMs", duracionMs,
                 "ocurridoEn", Instant.now().toString()
         );
