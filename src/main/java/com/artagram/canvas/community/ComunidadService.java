@@ -7,12 +7,15 @@ import com.artagram.canvas.community.dto.MiembroComunidadDto;
 import com.artagram.canvas.usuario.UsuarioProyeccion;
 import com.artagram.canvas.usuario.UsuarioProyeccionRepository;
 import com.artagram.canvas.usuario.UsuarioProyeccionResolver;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,6 +29,8 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 public class ComunidadService {
+
+    private static final int LIMITE_RECOMENDADAS = 20;
 
     private static final Logger log = LoggerFactory.getLogger(ComunidadService.class);
 
@@ -193,6 +198,24 @@ public class ComunidadService {
     public List<ComunidadResponse> misComunidades(UUID usuarioId) {
         return membresiaRepository.findByUsuario_UsuarioIdAndActivoTrue(usuarioId).stream()
                 .map(m -> aRespuesta(m.getComunidad(), m.getRol()))
+                .toList();
+    }
+
+    /** Primero las comunidades de quienes comparten comunidad contigo; si no alcanzan, las de mas miembros. */
+    @Transactional(readOnly = true)
+    public List<ComunidadResponse> recomendadas(UUID usuarioId, int limite) {
+        int tope = Math.clamp(limite, 1, LIMITE_RECOMENDADAS);
+        Set<UUID> ids = new LinkedHashSet<>(comunidadRepository.buscarPorMiembrosCompartidos(usuarioId, PageRequest.of(0, tope)));
+        if (ids.size() < tope) {
+            comunidadRepository.buscarConMasMiembros(usuarioId, PageRequest.of(0, tope * 2)).stream()
+                    .filter(id -> !ids.contains(id))
+                    .limit(tope - ids.size())
+                    .toList()
+                    .forEach(ids::add);
+        }
+        return ids.stream()
+                .flatMap(id -> comunidadRepository.findById(id).stream())
+                .map(c -> aRespuesta(c, null))
                 .toList();
     }
 

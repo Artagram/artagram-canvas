@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -64,6 +65,11 @@ public class ComunidadController {
     public List<ComunidadResponse> misComunidades(HttpServletRequest request) {
         JwtService.TokenPrincipal p = userResolver.resolverRequerido(request);
         return comunidadService.misComunidades(p.usuarioId());
+    }
+
+    @GetMapping("/api/comunidades/recomendadas")
+    public List<ComunidadResponse> recomendadas(HttpServletRequest request, @RequestParam(defaultValue = "10") int limite) {
+        return comunidadService.recomendadas(userResolver.resolverRequerido(request).usuarioId(), limite);
     }
 
     @GetMapping("/api/comunidades/{id}")
