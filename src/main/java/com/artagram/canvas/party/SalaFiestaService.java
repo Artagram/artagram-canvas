@@ -23,13 +23,9 @@ import org.springframework.transaction.annotation.Transactional;
  * sala" y su configuracion vive en Postgres (el respaldo); el reloj vivo de
  * la ronda vive en Redis via PartyRoundClock.
  * <p>
- * A diferencia del monolito, este servicio no reserva/libera un cupo de
- * "salas de fiesta activas" contra artagram-users: esa cuota nunca llegó a
- * tener un límite real (el código original la incrementaba sin tope alguno,
- * solo para analítica) y el esquema actual de {@code uso_cuenta} en
- * artagram-users ni siquiera tiene esas columnas — son de almacenamiento, no
- * de salas de fiesta. Si se decide medir esto, se agrega como un endpoint
- * interno nuevo en artagram-users; no es parte de este scaffold.
+ * El tope de salas activas del plan gratis se calcula aqui contando las salas
+ * del anfitrion, igual que {@code ComunidadService} con las comunidades: la
+ * tabla {@code uso_cuenta} de artagram-users es de almacenamiento.
  */
 @Service
 public class SalaFiestaService {
@@ -46,11 +42,13 @@ public class SalaFiestaService {
     private final PartyRoundClock roundClock;
     private final SeleccionadorPincelRonda seleccionadorPincel;
     private final RealtimeBroadcaster broadcaster;
+    private final PartyProperties properties;
 
     public SalaFiestaService(SalaFiestaRepository salaRepository, ParticipanteSalaRepository participanteRepository,
                               PartyRondaEstadoRepository rondaEstadoRepository, PartyDrawService partyDrawService,
                               UsuarioProyeccionResolver usuarioResolver, PartyRoundClock roundClock,
-                              SeleccionadorPincelRonda seleccionadorPincel, RealtimeBroadcaster broadcaster) {
+                              SeleccionadorPincelRonda seleccionadorPincel, RealtimeBroadcaster broadcaster,
+                              PartyProperties properties) {
         this.salaRepository = salaRepository;
         this.participanteRepository = participanteRepository;
         this.rondaEstadoRepository = rondaEstadoRepository;
@@ -59,10 +57,17 @@ public class SalaFiestaService {
         this.roundClock = roundClock;
         this.seleccionadorPincel = seleccionadorPincel;
         this.broadcaster = broadcaster;
+        this.properties = properties;
     }
 
     @Transactional
     public SalaFiestaResponse crear(com.artagram.canvas.auth.JwtService.TokenPrincipal principal, CrearSalaRequest request) {
+        if (!principal.premium()
+                && participanteRepository.contarSalasActivasComoAnfitrion(principal.usuarioId()) >= properties.getFreeMaxSalasActivas()) {
+            throw ApiException.forbidden("PLAN_LIMITE",
+                    "El plan gratis permite " + properties.getFreeMaxSalasActivas()
+                            + " sala activa. Cierra la que tienes abierta o pasate a PRO para crear salas ilimitadas");
+        }
         UsuarioProyeccion anfitrion = usuarioResolver.resolver(principal);
         String codigo = generarCodigoUnico();
         int totalRondas = request.totalRondas() != null ? request.totalRondas() : 3;
