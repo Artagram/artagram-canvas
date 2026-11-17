@@ -21,6 +21,10 @@ public class CanvasMetrics {
         this.latenciaTrazo = Timer.builder("trazo_latencia_ms")
                 .description("Tiempo de procesamiento server-side de cada trazo finalizado")
                 .publishPercentiles(0.5, 0.95, 0.99)
+                // Histograma para que Prometheus calcule el p95 sumando todas las replicas.
+                .publishPercentileHistogram()
+                .serviceLevelObjectives(Duration.ofMillis(50), Duration.ofMillis(100),
+                        Duration.ofMillis(200), Duration.ofMillis(500))
                 .register(registry);
         this.trazosFinalizados = Counter.builder("trazos_por_segundo")
                 .description("Trazos finalizados procesados; usar rate() en Prometheus para la tasa por segundo")

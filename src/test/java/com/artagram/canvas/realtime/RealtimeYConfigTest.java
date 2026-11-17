@@ -37,6 +37,7 @@ import org.springframework.http.server.ServerHttpResponse;
 import org.springframework.http.server.ServletServerHttpRequest;
 import org.springframework.messaging.Message;
 import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHandler;
 import org.springframework.messaging.SubscribableChannel;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.messaging.simp.config.ChannelRegistration;
@@ -77,7 +78,8 @@ class RealtimeYConfigTest {
         RTopic topic = mock(RTopic.class);
         when(redis.getTopic(anyString())).thenReturn(topic);
         SimpMessagingTemplate stompTemplate = mock(SimpMessagingTemplate.class);
-        RealtimeBroadcaster b = new RealtimeBroadcaster(redis, stompTemplate, new ObjectMapper());
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        RealtimeBroadcaster b = new RealtimeBroadcaster(redis, stompTemplate, new ObjectMapper(), registry);
         b.suscribirse();
         ArgumentCaptor<MessageListener> listener = ArgumentCaptor.forClass(MessageListener.class);
         verify(topic).addListener(any(Class.class), listener.capture());
@@ -93,6 +95,23 @@ class RealtimeYConfigTest {
         doThrow(new IllegalStateException("ws")).when(stompTemplate).convertAndSend(eq("/topic/z"), any(Object.class));
         b.enviar("/topic/z", "x");
         assertThatThrownBy(() -> b.enviar("/topic/x", new Object())).isInstanceOf(IllegalArgumentException.class);
+
+        // Cada entrega mide cuanto tardo en atravesar Redis, por canal.
+        assertThat(registry.get("trazo_propagacion").tag("canal", "x").timer().count()).isEqualTo(1);
+        assertThat(registry.get("trazo_propagacion").tag("canal", "usuario").timer().count()).isEqualTo(1);
+        MDC.put("traceId", "traza-relay");
+        b.enviar("/topic/lienzo/c1", Map.of("a", 1));
+        MDC.clear();
+        assertThat(registry.get("trazo_propagacion").tag("canal", "lienzo").timer().count()).isEqualTo(1);
+    }
+
+    @Test
+    void elCanalDeLaMetricaTienePocosValores() {
+        assertThat(RealtimeBroadcaster.canal("/topic/lienzo/123", false)).isEqualTo("lienzo");
+        assertThat(RealtimeBroadcaster.canal("/topic/banner/9", false)).isEqualTo("banner");
+        assertThat(RealtimeBroadcaster.canal("/queue/x", false)).isEqualTo("otro");
+        assertThat(RealtimeBroadcaster.canal(null, false)).isEqualTo("otro");
+        assertThat(RealtimeBroadcaster.canal("/queue/x", true)).isEqualTo("usuario");
     }
 
     @Test
@@ -119,14 +138,19 @@ class RealtimeYConfigTest {
         StompTraceInterceptor t = new StompTraceInterceptor();
         MessageChannel canal = mock(MessageChannel.class);
         assertThat(t.getOrder()).isEqualTo(Integer.MIN_VALUE);
-        t.preSend(stomp(StompCommand.SEND, "/app/x", principal, "traza-1"), canal);
+        MessageHandler handler = m -> { };
+        Message<?> conTraza = t.preSend(stomp(StompCommand.SEND, "/app/x", principal, "traza-1"), canal);
+        // preSend no toca el MDC del hilo del WebSocket: solo deja el id en el mensaje.
+        assertThat(MDC.get("traceId")).isNull();
+        t.beforeHandle(conTraza, canal, handler);
         assertThat(MDC.get("traceId")).isEqualTo("traza-1");
         assertThat(MDC.get("usuarioId")).isEqualTo(yo.toString());
-        t.afterMessageHandled(stomp(StompCommand.SEND, "/app/x", principal, null), canal, m -> { }, null);
+        t.afterMessageHandled(conTraza, canal, handler, null);
         assertThat(MDC.get("traceId")).isNull();
-        t.preSend(stomp(StompCommand.SEND, "/app/x", null, " "), canal);
-        assertThat(MDC.get("traceId")).isNotBlank();
-        t.preSend(stomp(StompCommand.SEND, "/app/x", null, null), canal);
+        Message<?> sinTraza = t.preSend(stomp(StompCommand.SEND, "/app/x", null, " "), canal);
+        t.beforeHandle(sinTraza, canal, handler);
+        assertThat(MDC.get("traceId")).hasSize(16);
+        t.beforeHandle(stomp(StompCommand.SEND, "/app/x", null, null), canal, handler);
         MDC.clear();
     }
 

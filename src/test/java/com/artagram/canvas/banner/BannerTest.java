@@ -202,9 +202,19 @@ class BannerTest {
         RRateLimiter rl = mock(RRateLimiter.class);
         when(redis.getRateLimiter(org.mockito.ArgumentMatchers.anyString())).thenReturn(rl);
         when(rl.tryAcquire()).thenReturn(true, false);
-        BannerRateLimiter l = new BannerRateLimiter(redis, props);
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        long[] ahora = {10_000};
+        BannerRateLimiter l = new BannerRateLimiter(redis, props, registry, () -> ahora[0]);
         assertThat(l.permitir(comunidadId, yo)).isTrue();
+        when(rl.tryAcquire()).thenReturn(false);
+        // Un ataque: varios excesos en el mismo segundo y otro despues.
+        for (int i = 0; i < 5; i++) {
+            assertThat(l.permitir(comunidadId, yo)).isFalse();
+        }
+        ahora[0] += 1500;
         assertThat(l.permitir(comunidadId, yo)).isFalse();
+        assertThat(registry.get("banner_eventos_descartados_total").counter().count()).isEqualTo(6.0);
+        assertThat(new BannerRateLimiter(redis, props, registry)).isNotNull();
         when(redis.getRateLimiter(org.mockito.ArgumentMatchers.anyString())).thenThrow(new IllegalStateException("redis caido"));
         assertThat(l.permitir(comunidadId, yo)).isTrue();
     }
