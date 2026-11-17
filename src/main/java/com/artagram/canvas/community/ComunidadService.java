@@ -94,7 +94,7 @@ public class ComunidadService {
                     UsuarioProyeccion usuario = usuarioResolver.resolver(usuarioId, nombreUsuario);
                     return membresiaRepository.save(new MembresiaComunidad(comunidad, usuario, RolComunidad.MIEMBRO));
                 });
-        log.info("Usuario {} se unió a la comunidad {} con rol {}", usuarioId, comunidadId, membresia.getRol());
+        log.info("Usuario {} se unió a la comunidad {} con rol {}", usuarioId, comunidadId, membresia.getRol()); // NOSONAR javasecurity:S5145 UUID y enum, sin saltos de línea
 
         return aRespuesta(comunidad, membresia.getRol());
     }

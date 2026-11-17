@@ -141,7 +141,7 @@ public class BannerService {
             for (int i = 0; i < totalRegiones; i++) {
                 regionEstadoRepository.save(new BannerRegionEstado(b.getId(), i));
             }
-            log.info("Banner auto-aprovisionado para comunidad {}", comunidadId);
+            log.info("Banner auto-aprovisionado para comunidad {}", comunidadId); // NOSONAR javasecurity:S5145 UUID tipado, sin saltos de línea
             return b;
         });
     }

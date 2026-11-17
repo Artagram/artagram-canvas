@@ -34,7 +34,7 @@ public class BannerRateLimiter {
             limiter.trySetRate(RateType.OVERALL, properties.getBannerRateLimitPerSecond(), 1, RateIntervalUnit.SECONDS);
             boolean permitido = limiter.tryAcquire();
             if (!permitido) {
-                log.warn("Limite de ritmo excedido en banner: comunidad={} usuario={}", comunidadId, usuarioId);
+                log.warn("Limite de ritmo excedido en banner: comunidad={} usuario={}", comunidadId, usuarioId); // NOSONAR javasecurity:S5145 UUID tipado, sin saltos de línea
             }
             return permitido;
         } catch (Exception e) {
