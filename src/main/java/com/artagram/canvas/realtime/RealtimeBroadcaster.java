@@ -7,6 +7,7 @@ import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PostConstruct;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import org.redisson.api.RTopic;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
@@ -59,6 +60,16 @@ public class RealtimeBroadcaster {
     private final ObjectMapper objectMapper;
     private final MeterRegistry registry;
     private RTopic topic;
+
+    /**
+     * El aviso de entrega lenta sale como mucho una vez por segundo, con cuantas
+     * hubo en ese lapso. Antes salia uno por mensaje: con el lienzo atrasado eso
+     * eran miles de lineas por segundo, el log (sincrono) frenaba mas la entrega
+     * y el atraso crecia sin freno.
+     */
+    static final long INTERVALO_AVISO_LENTO_MS = 1000;
+    private final AtomicLong ultimoAvisoLentoMs = new AtomicLong();
+    private final AtomicLong lentasSinAvisar = new AtomicLong();
 
     public RealtimeBroadcaster(RedissonClient redissonClient, SimpMessagingTemplate messagingTemplate,
                                ObjectMapper objectMapper, MeterRegistry registry) {
@@ -124,9 +135,20 @@ public class RealtimeBroadcaster {
                 .register(registry)
                 .record(Duration.ofMillis(ms));
         if (ms > UMBRAL_LENTO_MS) {
-            log.warn("Entrega de tiempo real lenta: canal={} destino={} ms={} traceId={}",
-                    canal, envelope.destino(), ms, envelope.traceId());
+            avisarLenta(canal, envelope, ms);
         }
+    }
+
+    private void avisarLenta(String canal, RelayEnvelope envelope, long ms) {
+        long lentas = lentasSinAvisar.incrementAndGet();
+        long ahora = System.currentTimeMillis();
+        long ultimo = ultimoAvisoLentoMs.get();
+        if (ahora - ultimo < INTERVALO_AVISO_LENTO_MS || !ultimoAvisoLentoMs.compareAndSet(ultimo, ahora)) {
+            return;
+        }
+        lentasSinAvisar.addAndGet(-lentas);
+        log.warn("Entrega de tiempo real lenta: canal={} destino={} ms={} traceId={} lentasEnElUltimoSegundo={}",
+                canal, envelope.destino(), ms, envelope.traceId(), lentas);
     }
 
     /** lienzo, banner, fiesta o usuario: pocos valores, para no disparar la cardinalidad. */

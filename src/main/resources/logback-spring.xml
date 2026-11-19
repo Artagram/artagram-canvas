@@ -21,7 +21,16 @@
         </encoder>
     </appender>
 
-    <root level="INFO">
+    <!-- Asincrono: escribir en stdout (que ECS manda a CloudWatch) nunca frena
+         a los hilos que atienden peticiones o el tiempo real. Si la cola se
+         llena se descartan lineas en vez de bloquear. -->
+    <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+        <queueSize>8192</queueSize>
+        <neverBlock>true</neverBlock>
         <appender-ref ref="JSON"/>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="ASYNC"/>
     </root>
 </configuration>

@@ -106,6 +106,33 @@ class RealtimeYConfigTest {
     }
 
     @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void lasEntregasLentasSeAvisanComoMuchoUnaVezPorSegundo() {
+        RedissonClient redis = mock(RedissonClient.class);
+        RTopic topic = mock(RTopic.class);
+        when(redis.getTopic(anyString())).thenReturn(topic);
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        RealtimeBroadcaster b = new RealtimeBroadcaster(redis, mock(SimpMessagingTemplate.class), new ObjectMapper(), registry);
+        b.suscribirse();
+        ArgumentCaptor<MessageListener> listener = ArgumentCaptor.forClass(MessageListener.class);
+        verify(topic).addListener(any(Class.class), listener.capture());
+        when(topic.publish(any())).thenAnswer(inv -> {
+            Thread.sleep(RealtimeBroadcaster.UMBRAL_LENTO_MS + 20);
+            listener.getValue().onMessage("canal", inv.getArgument(0));
+            return 1L;
+        });
+
+        for (int i = 0; i < 3; i++) {
+            b.enviar("/topic/lienzo/c1", Map.of("i", i));
+        }
+
+        // La primera lenta se avisa; las dos siguientes caen en el mismo segundo y solo se cuentan.
+        assertThat(((java.util.concurrent.atomic.AtomicLong)
+                org.springframework.test.util.ReflectionTestUtils.getField(b, "lentasSinAvisar")).get()).isEqualTo(2);
+        assertThat(registry.get("trazo_propagacion").tag("canal", "lienzo").timer().count()).isEqualTo(3);
+    }
+
+    @Test
     void elCanalDeLaMetricaTienePocosValores() {
         assertThat(RealtimeBroadcaster.canal("/topic/lienzo/123", false)).isEqualTo("lienzo");
         assertThat(RealtimeBroadcaster.canal("/topic/banner/9", false)).isEqualTo("banner");
