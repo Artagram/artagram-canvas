@@ -41,7 +41,11 @@ public class ComunidadTopicAuthorizer implements DestinationAuthorizer {
             return false;
         }
         UUID comunidadId = UUID.fromString(matcher.group(2));
-        boolean autorizado = comunidadService.esMiembroActivo(principal.usuarioId(), comunidadId);
+        // Un SEND (/app/...) llega por cada punto del trazo: se acepta una membresia
+        // confirmada hace poco. Las suscripciones (/topic/...) son pocas y van a la base.
+        boolean autorizado = destino.startsWith("/app/")
+                ? comunidadService.esMiembroActivoReciente(principal.usuarioId(), comunidadId)
+                : comunidadService.esMiembroActivo(principal.usuarioId(), comunidadId);
         if (!autorizado) {
             log.warn("Suscripcion denegada: usuario={} destino={} comunidad={}", principal.usuarioId(), destino, comunidadId);
         }

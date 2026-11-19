@@ -44,7 +44,10 @@ public class BannerTopicAuthorizer implements DestinationAuthorizer {
             return false;
         }
         UUID comunidadId = UUID.fromString(matcher.group(2));
-        boolean autorizado = comunidadService.esMiembroActivo(principal.usuarioId(), comunidadId)
+        boolean miembro = destino.startsWith("/app/")
+                ? comunidadService.esMiembroActivoReciente(principal.usuarioId(), comunidadId)
+                : comunidadService.esMiembroActivo(principal.usuarioId(), comunidadId);
+        boolean autorizado = miembro
                 || comunidadService.ver(comunidadId, principal.usuarioId()).publica();
         if (!autorizado) {
             log.warn("Suscripcion denegada: usuario={} destino={} comunidad={}", principal.usuarioId(), destino, comunidadId);

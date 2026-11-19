@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +53,40 @@ class ComunidadServiceBordesTest {
     private void rol(UUID usuario, RolComunidad rol) {
         when(membresias.findByComunidad_IdAndUsuario_UsuarioId(comunidadId, usuario))
                 .thenReturn(Optional.of(new MembresiaComunidad(publica, usuario.equals(creadorId) ? creador : otro, rol)));
+    }
+
+    @Test
+    void membresiaRecienteSoloConsultaLaBaseUnaVezYSeOlvidaAlExpulsar() {
+        assertThat(service.esMiembroActivoReciente(otroId, comunidadId)).isFalse();
+        when(membresias.existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, otroId)).thenReturn(true);
+        for (int i = 0; i < 5; i++) {
+            assertThat(service.esMiembroActivoReciente(otroId, comunidadId)).isTrue();
+        }
+        verify(membresias, times(2)).existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, otroId);
+
+        rol(creadorId, RolComunidad.ADMIN);
+        rol(otroId, RolComunidad.MIEMBRO);
+        service.expulsar(creadorId, "USUARIO", comunidadId, otroId);
+        when(membresias.existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, otroId)).thenReturn(false);
+        assertThat(service.esMiembroActivoReciente(otroId, comunidadId)).isFalse();
+
+        when(membresias.existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, creadorId)).thenReturn(true);
+        assertThat(service.esMiembroActivoReciente(creadorId, comunidadId)).isTrue();
+        service.eliminar(creadorId, comunidadId);
+        when(membresias.existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, creadorId)).thenReturn(false);
+        assertThat(service.esMiembroActivoReciente(creadorId, comunidadId)).isFalse();
+    }
+
+    @Test
+    void membresiaRecienteVaciaLaCacheSiSeLlena() {
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Long> cache = (java.util.Map<String, Long>) ReflectionTestUtils.getField(service, "miembrosRecientes");
+        for (int i = 0; i < 50_000; i++) {
+            cache.put("x" + i, Long.MAX_VALUE);
+        }
+        when(membresias.existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, otroId)).thenReturn(true);
+        assertThat(service.esMiembroActivoReciente(otroId, comunidadId)).isTrue();
+        assertThat(cache).hasSize(1);
     }
 
     @Test

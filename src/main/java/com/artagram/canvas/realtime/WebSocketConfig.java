@@ -21,6 +21,10 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 @EnableWebSocketMessageBroker
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
+    /** Hilos para procesar lo que mandan los clientes y para entregarles mensajes. */
+    static final int HILOS_ENTRADA = 8;
+    static final int HILOS_SALIDA = 8;
+
     private final CorsProperties corsProperties;
     private final StompAuthChannelInterceptor authInterceptor;
     private final StompTraceInterceptor traceInterceptor;
@@ -36,6 +40,10 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // Los mensajes de una misma sesion se procesan en el orden en que llegaron
+        // aunque el canal de entrada tenga varios hilos (un "final" nunca se
+        // adelanta a los "parcial" de su trazo).
+        registry.setPreserveReceiveOrder(true);
         registry.addEndpoint("/ws")
                 .setHandshakeHandler(new JwtHandshakeHandler())
                 .addInterceptors(new JwtHandshakeInterceptor(jwtService))
@@ -48,6 +56,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         // UserDestinationMessageHandler terminan como /queue/mensajes-user<sesion>, y esa
         // reescritura necesita caer dentro de un prefijo que el broker sepa enrutar.
         registry.enableSimpleBroker("/topic", "/queue");
+        // Orden por sesion en la salida, para poder usar varios hilos (ver abajo).
+        registry.setPreservePublishOrder(true);
         registry.setApplicationDestinationPrefixes("/app");
         registry.setUserDestinationPrefix("/user");
     }
@@ -55,13 +65,15 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
         registration.interceptors(traceInterceptor, authInterceptor);
+        registration.taskExecutor().corePoolSize(HILOS_ENTRADA).maxPoolSize(HILOS_ENTRADA);
     }
 
     @Override
     public void configureClientOutboundChannel(ChannelRegistration registration) {
-        // Un solo hilo de salida: sin esto, varios mensajes mandados casi juntos a
-        // la MISMA sesion pueden repartirse entre hilos del pool y llegarle al
-        // cliente desordenados, aunque el servidor los haya procesado en orden.
-        registration.taskExecutor().corePoolSize(1).maxPoolSize(1);
+        // Antes era un solo hilo para no desordenar los mensajes de una sesion, y
+        // ese hilo se volvia el cuello de botella con muchos trazos por segundo
+        // (escenario 1). Ahora el orden por sesion lo garantiza
+        // setPreservePublishOrder y la entrega se reparte entre varios hilos.
+        registration.taskExecutor().corePoolSize(HILOS_SALIDA).maxPoolSize(HILOS_SALIDA);
     }
 }

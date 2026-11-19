@@ -9,9 +9,11 @@ import com.artagram.canvas.usuario.UsuarioProyeccionRepository;
 import com.artagram.canvas.usuario.UsuarioProyeccionResolver;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -39,6 +41,16 @@ public class ComunidadService {
     private final UsuarioProyeccionRepository usuarioRepository;
     private final UsuarioProyeccionResolver usuarioResolver;
     private final ComunidadProperties properties;
+
+    /**
+     * Membresias confirmadas hace poco (clave usuario:comunidad -> vence en ms).
+     * Solo guarda respuestas positivas: un miembro nuevo nunca espera, y uno
+     * expulsado en otra replica deja de poder publicar en a lo sumo
+     * {@link #VIGENCIA_CACHE_MS}.
+     */
+    private final Map<String, Long> miembrosRecientes = new ConcurrentHashMap<>();
+    static final long VIGENCIA_CACHE_MS = 30_000L;
+    private static final int MAX_CACHE = 50_000;
 
     public ComunidadService(ComunidadRepository comunidadRepository,
                              MembresiaComunidadRepository membresiaRepository,
@@ -168,6 +180,7 @@ public class ComunidadService {
         MembresiaComunidad membresia = membresiaRepository.findByComunidad_IdAndUsuario_UsuarioId(comunidadId, usuarioObjetivoId)
                 .orElseThrow(() -> ApiException.notFound("MIEMBRO_NO_ENCONTRADO", "Ese usuario no es miembro de la comunidad"));
         membresia.expulsar();
+        miembrosRecientes.remove(usuarioObjetivoId + ":" + comunidadId);
         log.info("Usuario {} expulsado de la comunidad {} (por {})", usuarioObjetivoId, comunidadId, solicitanteId);
     }
 
@@ -179,6 +192,7 @@ public class ComunidadService {
             throw ApiException.forbidden("SOLO_CREADOR", "Solo quien creo la comunidad puede eliminarla");
         }
         comunidadRepository.delete(comunidad);
+        miembrosRecientes.keySet().removeIf(clave -> clave.endsWith(":" + comunidadId));
         log.info("Comunidad eliminada: id={} nombre='{}' por={}", comunidadId, comunidad.getNombre(), usuarioId);
     }
 
@@ -192,6 +206,31 @@ public class ComunidadService {
     @Transactional(readOnly = true)
     public boolean esMiembroActivo(UUID usuarioId, UUID comunidadId) {
         return membresiaRepository.existsByComunidad_IdAndUsuario_UsuarioIdAndActivoTrue(comunidadId, usuarioId);
+    }
+
+    /**
+     * Igual que {@link #esMiembroActivo} pero recuerda los aciertos unos
+     * segundos. Es para los mensajes STOMP que se publican muchas veces por
+     * segundo (cada punto de un trazo, cada evento del banner): sin esto cada
+     * uno era una consulta a la base y el lienzo se atascaba con pocas decenas
+     * de personas dibujando (escenario 1).
+     */
+    public boolean esMiembroActivoReciente(UUID usuarioId, UUID comunidadId) {
+        String clave = usuarioId + ":" + comunidadId;
+        long ahora = System.currentTimeMillis();
+        Long vence = miembrosRecientes.get(clave);
+        if (vence != null && ahora < vence) {
+            return true;
+        }
+        if (!esMiembroActivo(usuarioId, comunidadId)) {
+            miembrosRecientes.remove(clave);
+            return false;
+        }
+        if (miembrosRecientes.size() >= MAX_CACHE) {
+            miembrosRecientes.clear();
+        }
+        miembrosRecientes.put(clave, ahora + VIGENCIA_CACHE_MS);
+        return true;
     }
 
     @Transactional(readOnly = true)
