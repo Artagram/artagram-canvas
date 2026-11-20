@@ -105,6 +105,14 @@ class RealtimeYConfigTest {
         b.enviar("/topic/lienzo/c1", Map.of("a", 1));
         MDC.clear();
         assertThat(registry.get("trazo_propagacion").tag("canal", "lienzo").timer().count()).isEqualTo(1);
+
+        // El resumen periodico cuenta y reinicia; sin movimiento no escribe nada.
+        assertThat(((java.util.concurrent.atomic.LongAdder)
+                org.springframework.test.util.ReflectionTestUtils.getField(b, "recibidosLienzo")).sum()).isEqualTo(1);
+        b.resumirActividad();
+        assertThat(((java.util.concurrent.atomic.LongAdder)
+                org.springframework.test.util.ReflectionTestUtils.getField(b, "publicados")).sum()).isZero();
+        b.resumirActividad();
     }
 
     @Test

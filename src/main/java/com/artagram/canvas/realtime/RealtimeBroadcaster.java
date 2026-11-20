@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import org.redisson.api.RTopic;
 import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
@@ -19,6 +20,7 @@ import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessageType;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.util.MimeTypeUtils;
 
@@ -80,6 +82,11 @@ public class RealtimeBroadcaster {
     private final AtomicLong ultimoAvisoLentoMs = new AtomicLong();
     private final AtomicLong lentasSinAvisar = new AtomicLong();
 
+    /** Para el resumen periodico del log: lo que esta replica publico y lo que recibio por Redis. */
+    private final LongAdder publicados = new LongAdder();
+    private final LongAdder recibidos = new LongAdder();
+    private final LongAdder recibidosLienzo = new LongAdder();
+
     public RealtimeBroadcaster(RedissonClient redissonClient, SimpMessagingTemplate messagingTemplate,
                                ObjectMapper objectMapper, MeterRegistry registry) {
         this.redissonClient = redissonClient;
@@ -108,6 +115,7 @@ public class RealtimeBroadcaster {
 
     private void publicar(RelayEnvelope envelope) {
         topic.publish(envelope);
+        publicados.increment();
     }
 
     private void entregarLocal(RelayEnvelope envelope) {
@@ -115,6 +123,10 @@ public class RealtimeBroadcaster {
             MDC.put(TraceContext.TRACE_ID_MDC_KEY, envelope.traceId());
         }
         try {
+            recibidos.increment();
+            if (envelope.destino() != null && envelope.destino().startsWith("/topic/lienzo/")) {
+                recibidosLienzo.increment();
+            }
             medirPropagacion(envelope);
             String destino = envelope.tipo() == TipoEnvio.USUARIO
                     ? PREFIJO_USUARIO + envelope.usuarioId().replace("/", "%2F")
@@ -157,6 +169,23 @@ public class RealtimeBroadcaster {
                 .record(Duration.ofMillis(ms));
         if (ms > UMBRAL_LENTO_MS) {
             avisarLenta(canal, envelope, ms);
+        }
+    }
+
+    /**
+     * Cada 10 s, si hubo movimiento, deja en el log cuantos mensajes publico
+     * esta replica (de sus propias sesiones) y cuantos recibio por Redis (de
+     * todas las replicas). Con dos replicas se ve en CloudWatch que cada una
+     * recibe tambien lo que publico la otra: la prueba de que el tiempo real
+     * llega a todas (escenario 1). Sale una linea cada 10 s, no una por mensaje.
+     */
+    @Scheduled(fixedRate = 10_000, initialDelay = 10_000)
+    void resumirActividad() {
+        long pub = publicados.sumThenReset();
+        long rec = recibidos.sumThenReset();
+        long lienzo = recibidosLienzo.sumThenReset();
+        if (pub > 0 || rec > 0) {
+            log.info("Relay de tiempo real (ultimos 10 s): publicados={} recibidos={} recibidosLienzo={}", pub, rec, lienzo);
         }
     }
 
