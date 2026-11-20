@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PostConstruct;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -13,8 +14,13 @@ import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageType;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.messaging.support.MessageBuilder;
 import org.springframework.stereotype.Component;
+import org.springframework.util.MimeTypeUtils;
 
 /**
  * Reparte los mensajes de tiempo real (lienzo, banner, fiesta, chat de fiesta)
@@ -54,6 +60,9 @@ public class RealtimeBroadcaster {
 
     /** Por encima de esto una entrega cuenta como lenta (p95 objetivo de los escenarios 1 y 10). */
     static final long UMBRAL_LENTO_MS = 200;
+
+    /** Igual que el prefijo de destinos de usuario de {@link WebSocketConfig}. */
+    private static final String PREFIJO_USUARIO = "/user/";
 
     private final RedissonClient redissonClient;
     private final SimpMessagingTemplate messagingTemplate;
@@ -107,17 +116,29 @@ public class RealtimeBroadcaster {
         }
         try {
             medirPropagacion(envelope);
-            Object payload = objectMapper.readValue(envelope.payloadJson(), Object.class);
-            if (envelope.tipo() == TipoEnvio.USUARIO) {
-                messagingTemplate.convertAndSendToUser(envelope.usuarioId(), envelope.destino(), payload);
-            } else {
-                messagingTemplate.convertAndSend(envelope.destino(), payload);
-            }
+            String destino = envelope.tipo() == TipoEnvio.USUARIO
+                    ? PREFIJO_USUARIO + envelope.usuarioId().replace("/", "%2F")
+                            + (envelope.destino().startsWith("/") ? "" : "/") + envelope.destino()
+                    : envelope.destino();
+            messagingTemplate.send(destino, mensajeJson(envelope.payloadJson()));
         } catch (Exception e) {
             log.error("No se pudo entregar un mensaje de tiempo real relayado: destino={}", envelope.destino(), e);
         } finally {
             MDC.remove(TraceContext.TRACE_ID_MDC_KEY);
         }
+    }
+
+    /**
+     * El JSON viaja tal cual hasta el navegador: antes cada replica lo convertia
+     * a objeto y el conversor de STOMP lo volvia a serializar, dos pasadas de
+     * Jackson por mensaje en cada replica que se notaban con muchos trazos por
+     * segundo (escenario 1).
+     */
+    static Message<byte[]> mensajeJson(String json) {
+        SimpMessageHeaderAccessor cabeceras = SimpMessageHeaderAccessor.create(SimpMessageType.MESSAGE);
+        cabeceras.setContentType(MimeTypeUtils.APPLICATION_JSON);
+        cabeceras.setLeaveMutable(true);
+        return MessageBuilder.createMessage(json.getBytes(StandardCharsets.UTF_8), cabeceras.getMessageHeaders());
     }
 
     private void medirPropagacion(RelayEnvelope envelope) {

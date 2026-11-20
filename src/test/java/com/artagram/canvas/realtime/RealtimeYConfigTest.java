@@ -89,16 +89,18 @@ class RealtimeYConfigTest {
         });
 
         b.enviar("/topic/x", Map.of("a", 1));
-        verify(stompTemplate).convertAndSend(eq("/topic/x"), any(Object.class));
+        verify(stompTemplate).send(eq("/topic/x"), any(Message.class));
         b.enviarAUsuario("u1", "/queue/y", List.of(1));
-        verify(stompTemplate).convertAndSendToUser(eq("u1"), eq("/queue/y"), any(Object.class));
-        doThrow(new IllegalStateException("ws")).when(stompTemplate).convertAndSend(eq("/topic/z"), any(Object.class));
+        verify(stompTemplate).send(eq("/user/u1/queue/y"), any(Message.class));
+        b.enviarAUsuario("a/b", "sin-barra", List.of(1));
+        verify(stompTemplate).send(eq("/user/a%2Fb/sin-barra"), any(Message.class));
+        doThrow(new IllegalStateException("ws")).when(stompTemplate).send(eq("/topic/z"), any(Message.class));
         b.enviar("/topic/z", "x");
         assertThatThrownBy(() -> b.enviar("/topic/x", new Object())).isInstanceOf(IllegalArgumentException.class);
 
         // Cada entrega mide cuanto tardo en atravesar Redis, por canal.
         assertThat(registry.get("trazo_propagacion").tag("canal", "x").timer().count()).isEqualTo(1);
-        assertThat(registry.get("trazo_propagacion").tag("canal", "usuario").timer().count()).isEqualTo(1);
+        assertThat(registry.get("trazo_propagacion").tag("canal", "usuario").timer().count()).isEqualTo(2);
         MDC.put("traceId", "traza-relay");
         b.enviar("/topic/lienzo/c1", Map.of("a", 1));
         MDC.clear();
@@ -130,6 +132,14 @@ class RealtimeYConfigTest {
         assertThat(((java.util.concurrent.atomic.AtomicLong)
                 org.springframework.test.util.ReflectionTestUtils.getField(b, "lentasSinAvisar")).get()).isEqualTo(2);
         assertThat(registry.get("trazo_propagacion").tag("canal", "lienzo").timer().count()).isEqualTo(3);
+    }
+
+    @Test
+    void elMensajeRelayadoLlevaElJsonTalCual() {
+        Message<byte[]> m = RealtimeBroadcaster.mensajeJson("{\"a\":1}");
+        assertThat(new String(m.getPayload(), java.nio.charset.StandardCharsets.UTF_8)).isEqualTo("{\"a\":1}");
+        assertThat(m.getHeaders().get(org.springframework.messaging.MessageHeaders.CONTENT_TYPE).toString())
+                .isEqualTo("application/json");
     }
 
     @Test
